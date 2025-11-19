@@ -45,17 +45,15 @@ typedef struct TPMStateSPI {
     //SSIBus *bus;
 } TPMStateSPI;
 
+//DECLARE_INSTANCE_CHECKER(TPMStateSPI, TPM_TIS_SPI, TYPE_TPM_TIS_SPI)
 
 typedef struct TPMTisSpiClass {
     SSIPeripheralClass parent_class;
+    DeviceRealize parent_realize;
+    //void (*parent_realize)(SSIPeripheral *dev, Error **errp);
 } TPMTisSpiClass;
 
 OBJECT_DECLARE_TYPE(TPMStateSPI, TPMTisSpiClass, TPM_TIS_SPI)
-//OBJECT_DECLARE_SIMPLE_TYPE(TPMStateSPI, TPM_TIS_SPI)
-
-//DECLARE_INSTANCE_CHECKER(TPMStateSPI, TPM_TIS_SPI,
-//                         TYPE_TPM_TIS_SPI)
-
 
 static int tpm_tis_spi_pre_save(void *opaque)
 {
@@ -125,19 +123,29 @@ static enum TPMVersion tpm_tis_spi_get_tpm_version(TPMIf *ti)
     return tpm_tis_get_tpm_version(s);
 }
 
+#if 0
 static void tpm_tis_spi_realizefn(DeviceState *dev, Error **errp)
 {
     TPMStateSPI *spist = TPM_TIS_SPI(dev);
     TPMState *s = &spist->state;
-
+#if 0
     SSIPeripheral *ssip = SSI_PERIPHERAL(dev);
+
     SSIPeripheralClass *ssc = SSI_PERIPHERAL_GET_CLASS(ssip);
 
-    ssip->spc = ssc;
+    TPMTisSpiClass *ttc = TPM_TIS_SPI_GET_CLASS(dev);
+
+    if(ttc->parent_realize) {
+        ttc->parent_realize(dev, errp);
+        if(*errp) {
+            return;
+        }
+    }
 
     if(ssc->realize) {
         ssc->realize(ssip, errp);
     }
+#endif
 
     if (!tpm_find()) {
         error_setg(errp, "at most one TPM device is permitted");
@@ -155,6 +163,7 @@ static void tpm_tis_spi_realizefn(DeviceState *dev, Error **errp)
         return;
     }
 }
+#endif
 
 static void tpm_tis_spi_reset(DeviceState *dev)
 {
@@ -181,23 +190,46 @@ static uint32_t tpm_tis_spi_transfer_raw(SSIPeripheral *dev, uint32_t val)
     return 0xFF;
 }
 
-#if 0
+
 static void tpm_tis_spi_realize_ssi(SSIPeripheral *d, Error **errp)
 {
-    TPMStateSPI *s = TPM_TIS_SPI(d);
-    SSIPeripheralClass *ssic = SSI_PERIPHERAL_GET_CLASS(s);
-    d->spc = ssic;
+    TPMStateSPI *spist = TPM_TIS_SPI(d);
+    TPMState *s = &spist->state;
+    //SSIPeripheralClass *ssic = SSI_PERIPHERAL_GET_CLASS(s);
+    //d->spc = ssic;
     //(void) ssic;
+
+    //TPMStateSPI *spist = TPM_TIS_SPI(dev);
+    //TPMState *s = &spist->state;
+
+    if (!tpm_find()) {
+        error_setg(errp, "at most one TPM device is permitted");
+        return;
+    }
+
+    /*
+     * Get the backend pointer. It is not initialized properly during
+     * device_class_set_props
+     */
+    s->be_driver = qemu_find_tpm_be("tpm0");
+
+    if (!s->be_driver) {
+        error_setg(errp, "'tpmdev' property is required");
+        return;
+    }
 }
-#endif
+
 
 static void tpm_tis_spi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
     TPMIfClass *tc = TPM_IF_CLASS(klass);
+    //TPMTisSpiClass *ttc = TPM_TIS_SPI_CLASS(klass);
+    //PMTisSpiClass *ttc = TPM_TIS_SPI(klass);
 
-    dc->realize = tpm_tis_spi_realizefn;
+    //ttc->parent_realize = dc->realize;
+    //dc->realize = tpm_tis_spi_realizefn;
     device_class_set_legacy_reset(dc, tpm_tis_spi_reset);
     dc->vmsd = &vmstate_tpm_tis_spi;
     device_class_set_props(dc, tpm_tis_spi_properties);
@@ -205,7 +237,7 @@ static void tpm_tis_spi_class_init(ObjectClass *klass, const void *data)
 
     /* @TODO Implement SSIPeripheralClass initialization here */
     //(void) k;
-    //k->realize = tpm_tis_spi_realize_ssi;
+    k->realize = tpm_tis_spi_realize_ssi;
     k->transfer = tpm_tis_spi_transfer;
     k->transfer_raw = tpm_tis_spi_transfer_raw;
 
