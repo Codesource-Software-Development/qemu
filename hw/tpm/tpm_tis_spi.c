@@ -45,15 +45,8 @@ typedef struct TPMStateSPI {
     //SSIBus *bus;
 } TPMStateSPI;
 
-//DECLARE_INSTANCE_CHECKER(TPMStateSPI, TPM_TIS_SPI, TYPE_TPM_TIS_SPI)
-
-typedef struct TPMTisSpiClass {
-    SSIPeripheralClass parent_class;
-    DeviceRealize parent_realize;
-    //void (*parent_realize)(SSIPeripheral *dev, Error **errp);
-} TPMTisSpiClass;
-
-OBJECT_DECLARE_TYPE(TPMStateSPI, TPMTisSpiClass, TPM_TIS_SPI)
+//OBJECT_DECLARE_TYPE(TPMStateSPI, TPMTisSpiClass, TPM_TIS_SPI)
+OBJECT_DECLARE_SIMPLE_TYPE(TPMStateSPI, TPM_TIS_SPI)
 
 static int tpm_tis_spi_pre_save(void *opaque)
 {
