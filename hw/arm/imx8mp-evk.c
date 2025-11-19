@@ -88,6 +88,25 @@ static void imx8mp_evk_init(MachineState *machine)
         qdev_realize_and_unref(carddev, bus, &error_fatal);
     }
 
+    BusState* ssibus = qdev_get_child_bus(DEVICE(&s->spi[1]), "spi");
+    if(!ssibus) {
+        error_report("tpm-spi: Could not find spi bus 1");
+        return;
+    }
+
+    DeviceState* tpm_spi;
+    tpm_spi = qdev_new("tpm-tis-spi");
+
+    qdev_prop_set_uint32(tpm_spi, "cs", 0);
+    qdev_prop_set_string(tpm_spi, "tpmdev", "tpm0");
+
+    if(!tpm_spi) {
+        error_report("Could not find tpm-tis-spi");
+        return;
+    }
+
+    qdev_realize_and_unref(tpm_spi, ssibus, &error_fatal);
+
     if (!qtest_enabled()) {
         arm_load_kernel(&s->cpu[0], machine, &boot_info);
     }
