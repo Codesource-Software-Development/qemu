@@ -41,11 +41,20 @@ typedef struct TPMStateSPI {
     /*< private >*/
     SSIPeripheral parent_obj;
     TPMState state;
+    BusState qbus;
     //SSIBus *bus;
 } TPMStateSPI;
 
-DECLARE_INSTANCE_CHECKER(TPMStateSPI, TPM_TIS_SPI,
-                         TYPE_TPM_TIS_SPI)
+
+typedef struct TPMTisSpiClass {
+    SSIPeripheralClass parent_class;
+} TPMTisSpiClass;
+
+OBJECT_DECLARE_TYPE(TPMStateSPI, TPMTisSpiClass, TPM_TIS_SPI)
+//OBJECT_DECLARE_SIMPLE_TYPE(TPMStateSPI, TPM_TIS_SPI)
+
+//DECLARE_INSTANCE_CHECKER(TPMStateSPI, TPM_TIS_SPI,
+//                         TYPE_TPM_TIS_SPI)
 
 
 static int tpm_tis_spi_pre_save(void *opaque)
@@ -96,7 +105,6 @@ static const VMStateDescription vmstate_tpm_tis_spi = {
 };
 
 static const Property tpm_tis_spi_properties[] = {
-    //DEFINE_PROP_LINK("spi-bus", TPMStateSPI, bus, TYPE_SSI_BUS, SSIBus *),
     DEFINE_PROP_TPMBE("tpmdev", TPMStateSPI, state.be_driver),
 };
 
@@ -121,6 +129,15 @@ static void tpm_tis_spi_realizefn(DeviceState *dev, Error **errp)
 {
     TPMStateSPI *spist = TPM_TIS_SPI(dev);
     TPMState *s = &spist->state;
+
+    SSIPeripheral *ssip = SSI_PERIPHERAL(dev);
+    SSIPeripheralClass *ssc = SSI_PERIPHERAL_GET_CLASS(ssip);
+
+    ssip->spc = ssc;
+
+    if(ssc->realize) {
+        ssc->realize(ssip, errp);
+    }
 
     if (!tpm_find()) {
         error_setg(errp, "at most one TPM device is permitted");
@@ -152,6 +169,28 @@ static void tpm_tis_spi_reset(DeviceState *dev)
     return tpm_tis_reset(s);
 }
 
+static uint32_t tpm_tis_spi_transfer(SSIPeripheral *dev, uint32_t val)
+{
+    fprintf(stderr, "[TPM-SPI] transfer val=0x%02x\n", val);
+    return 0xFF;
+}
+
+static uint32_t tpm_tis_spi_transfer_raw(SSIPeripheral *dev, uint32_t val)
+{
+    fprintf(stderr, "[TPM-SPI] transfer val=0x%02x\n", val);
+    return 0xFF;
+}
+
+#if 0
+static void tpm_tis_spi_realize_ssi(SSIPeripheral *d, Error **errp)
+{
+    TPMStateSPI *s = TPM_TIS_SPI(d);
+    SSIPeripheralClass *ssic = SSI_PERIPHERAL_GET_CLASS(s);
+    d->spc = ssic;
+    //(void) ssic;
+}
+#endif
+
 static void tpm_tis_spi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -164,8 +203,11 @@ static void tpm_tis_spi_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, tpm_tis_spi_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 
-    /* @TODO Implement SSIPeripheral initialization here */
-    (void) k;
+    /* @TODO Implement SSIPeripheralClass initialization here */
+    //(void) k;
+    //k->realize = tpm_tis_spi_realize_ssi;
+    k->transfer = tpm_tis_spi_transfer;
+    k->transfer_raw = tpm_tis_spi_transfer_raw;
 
     tc->model = TPM_MODEL_TPM_TIS;
     tc->request_completed = tpm_tis_spi_request_completed;
