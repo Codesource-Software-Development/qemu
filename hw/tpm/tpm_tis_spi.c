@@ -42,10 +42,20 @@ typedef struct TPMStateSPI {
     SSIPeripheral parent_obj;
     TPMState state;
     BusState qbus;
-    //SSIBus *bus;
+
+    int in_header;
+    int header_cnt;
+    int is_read;
+
+    uint8_t transfer_bytes_left;
+    uint8_t write_len;
+
+    uint64_t addr;
+
+    uint32_t tpm_transfer_value; // Used for both reads and writes
+
 } TPMStateSPI;
 
-//OBJECT_DECLARE_TYPE(TPMStateSPI, TPMTisSpiClass, TPM_TIS_SPI)
 OBJECT_DECLARE_SIMPLE_TYPE(TPMStateSPI, TPM_TIS_SPI)
 
 static int tpm_tis_spi_pre_save(void *opaque)
@@ -116,71 +126,87 @@ static enum TPMVersion tpm_tis_spi_get_tpm_version(TPMIf *ti)
     return tpm_tis_get_tpm_version(s);
 }
 
-#if 0
-static void tpm_tis_spi_realizefn(DeviceState *dev, Error **errp)
+static void reset_tpm_framing(TPMStateSPI *spist)
 {
-    TPMStateSPI *spist = TPM_TIS_SPI(dev);
-    TPMState *s = &spist->state;
-#if 0
-    SSIPeripheral *ssip = SSI_PERIPHERAL(dev);
-
-    SSIPeripheralClass *ssc = SSI_PERIPHERAL_GET_CLASS(ssip);
-
-    TPMTisSpiClass *ttc = TPM_TIS_SPI_GET_CLASS(dev);
-
-    if(ttc->parent_realize) {
-        ttc->parent_realize(dev, errp);
-        if(*errp) {
-            return;
-        }
-    }
-
-    if(ssc->realize) {
-        ssc->realize(ssip, errp);
-    }
-#endif
-
-    if (!tpm_find()) {
-        error_setg(errp, "at most one TPM device is permitted");
-        return;
-    }
-
-    /*
-     * Get the backend pointer. It is not initialized properly during
-     * device_class_set_props
-     */
-    s->be_driver = qemu_find_tpm_be("tpm0");
-
-    if (!s->be_driver) {
-        error_setg(errp, "'tpmdev' property is required");
-        return;
-    }
+    spist->in_header = 1;
+    spist->header_cnt = 0;
+    spist->addr = 0;
+    spist->transfer_bytes_left = 0;
+    spist->write_len = 0;
+    spist->tpm_transfer_value = 0;
 }
-#endif
 
 static void tpm_tis_spi_reset(DeviceState *dev)
 {
     TPMStateSPI *spist = TPM_TIS_SPI(dev);
     TPMState *s = &spist->state;
 
-    //tpm_tis_spi_clear_data(spist);
-
-
-    //spist->
+    reset_tpm_framing(spist);
 
     return tpm_tis_reset(s);
 }
 
-static uint32_t tpm_tis_spi_transfer(SSIPeripheral *dev, uint32_t val)
-{
-    fprintf(stderr, "[TPM-SPI] transfer val=0x%02x\n", val);
-    return 0xFF;
-}
-
 static uint32_t tpm_tis_spi_transfer_raw(SSIPeripheral *dev, uint32_t val)
 {
-    fprintf(stderr, "[TPM-SPI] transfer val=0x%02x\n", val);
-    return 0xFF;
+    TPMStateSPI *spist = TPM_TIS_SPI(dev);
+    if(spist->in_header) {
+        if(spist->header_cnt == 0) {
+            spist->is_read = val & 0x80 ? 1 : 0;
+            spist->transfer_bytes_left = val & 0x3f;
+            spist->transfer_bytes_left += 1;
+            spist->write_len = spist->transfer_bytes_left; // Set the value in case it's a write.
+            ++spist->header_cnt;
+            return 0xff;
+        } else if (spist->header_cnt == 1) {
+            if (val != 0xd4) {
+                qemu_log_mask(LOG_GUEST_ERROR, "Received unexpected TIS-SPI opcode, expected 0xd4, got 0x%02x", val);
+            }
+            ++spist->header_cnt;
+            return 0xff;
+        } else if (spist->header_cnt == 2) {
+            spist->addr = val & 0xff;
+            ++spist->header_cnt;
+            return 0xff;
+        } else if (spist->header_cnt == 3) {
+            spist->addr |= val << 8;
+            spist->header_cnt = 0;
+            spist->in_header = 0;
+            if(spist->is_read) {
+                fprintf(stderr, "Calling tpm_tis_read with addr: 0x%08lx , len : 0x%02x\n", spist->addr, spist->transfer_bytes_left);
+                spist->tpm_transfer_value = tpm_tis_read_data(&spist->state, spist->addr, spist->transfer_bytes_left);
+                fprintf(stderr, "tpm_tis_read returned : 0x%04x\n", spist->tpm_transfer_value);
+            }
+            return 0xff;
+        }
+    } else {
+        if(spist->transfer_bytes_left == 0) {
+            qemu_log_mask(LOG_GUEST_ERROR, "TPM-TIS-SPI, bad transfer len of 0, resetting TPM-SPI framing");
+            reset_tpm_framing(spist);
+            return 0xff;
+        }
+        if(spist->is_read) {
+            uint32_t retval = spist->tpm_transfer_value & 0xff;
+            spist->tpm_transfer_value >>= 8;
+            spist->transfer_bytes_left--;
+            if(spist->transfer_bytes_left == 0) {
+                reset_tpm_framing(spist);
+            }
+            fprintf(stderr, "Dummy read, returning: 0x%02x\n", retval);
+            return retval;
+        } else {
+            fprintf(stderr, "Clocking in write value 0x%02x\n", val & 0xff);
+            spist->tpm_transfer_value <<= 8;
+            spist->tpm_transfer_value |= val &0xff;
+            spist->transfer_bytes_left--;
+            if(spist->transfer_bytes_left == 0) {
+                reset_tpm_framing(spist);
+                fprintf(stderr, "Calling tpm_tis_write_data with addr: 0x%08lx value : 0x%04x len: 0x%02x\n", spist->addr, spist->tpm_transfer_value, spist->write_len);
+                tpm_tis_write_data(&spist->state, spist->addr, spist->tpm_transfer_value, spist->write_len);
+            }
+            return 0xff;
+        }
+    }
+    return 0xff;
 }
 
 
@@ -188,12 +214,6 @@ static void tpm_tis_spi_realize_ssi(SSIPeripheral *d, Error **errp)
 {
     TPMStateSPI *spist = TPM_TIS_SPI(d);
     TPMState *s = &spist->state;
-    //SSIPeripheralClass *ssic = SSI_PERIPHERAL_GET_CLASS(s);
-    //d->spc = ssic;
-    //(void) ssic;
-
-    //TPMStateSPI *spist = TPM_TIS_SPI(dev);
-    //TPMState *s = &spist->state;
 
     if (!tpm_find()) {
         error_setg(errp, "at most one TPM device is permitted");
@@ -218,20 +238,14 @@ static void tpm_tis_spi_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
     TPMIfClass *tc = TPM_IF_CLASS(klass);
-    //TPMTisSpiClass *ttc = TPM_TIS_SPI_CLASS(klass);
-    //PMTisSpiClass *ttc = TPM_TIS_SPI(klass);
 
-    //ttc->parent_realize = dc->realize;
-    //dc->realize = tpm_tis_spi_realizefn;
     device_class_set_legacy_reset(dc, tpm_tis_spi_reset);
     dc->vmsd = &vmstate_tpm_tis_spi;
     device_class_set_props(dc, tpm_tis_spi_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 
-    /* @TODO Implement SSIPeripheralClass initialization here */
-    //(void) k;
     k->realize = tpm_tis_spi_realize_ssi;
-    k->transfer = tpm_tis_spi_transfer;
+    k->transfer = 0;//tpm_tis_spi_transfer;
     k->transfer_raw = tpm_tis_spi_transfer_raw;
 
     tc->model = TPM_MODEL_TPM_TIS;
