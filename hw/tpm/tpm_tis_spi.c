@@ -148,6 +148,11 @@ static void tpm_tis_spi_reset(DeviceState *dev)
 
 static uint32_t tpm_tis_spi_transfer_raw(SSIPeripheral *dev, uint32_t val)
 {
+    // @TODO Make the cs index a property, instead of hardcoding it.
+    //fprintf(stderr, "cs: %d\n", dev->cs_index);
+    if(dev->cs_index != 0) {
+        return 0x00;
+    }
     TPMStateSPI *spist = TPM_TIS_SPI(dev);
     if(spist->in_header) {
         if(spist->header_cnt == 0) {
@@ -164,11 +169,11 @@ static uint32_t tpm_tis_spi_transfer_raw(SSIPeripheral *dev, uint32_t val)
             ++spist->header_cnt;
             return 0xff;
         } else if (spist->header_cnt == 2) {
-            spist->addr = val & 0xff;
+            spist->addr |= val << 8;
             ++spist->header_cnt;
             return 0xff;
         } else if (spist->header_cnt == 3) {
-            spist->addr |= val << 8;
+            spist->addr = val & 0xff;
             spist->header_cnt = 0;
             spist->in_header = 0;
             if(spist->is_read) {
@@ -191,17 +196,18 @@ static uint32_t tpm_tis_spi_transfer_raw(SSIPeripheral *dev, uint32_t val)
             if(spist->transfer_bytes_left == 0) {
                 reset_tpm_framing(spist);
             }
-            fprintf(stderr, "Dummy read, returning: 0x%02x\n", retval);
+            //fprintf(stderr, "Dummy read, returning: 0x%02x\n", retval);
             return retval;
         } else {
-            fprintf(stderr, "Clocking in write value 0x%02x\n", val & 0xff);
+            //fprintf(stderr, "Clocking in write value 0x%02x, trf bytes left: %d\n", val & 0xff, spist->transfer_bytes_left);
             spist->tpm_transfer_value <<= 8;
             spist->tpm_transfer_value |= val &0xff;
             spist->transfer_bytes_left--;
             if(spist->transfer_bytes_left == 0) {
-                reset_tpm_framing(spist);
                 fprintf(stderr, "Calling tpm_tis_write_data with addr: 0x%08lx value : 0x%04x len: 0x%02x\n", spist->addr, spist->tpm_transfer_value, spist->write_len);
                 tpm_tis_write_data(&spist->state, spist->addr, spist->tpm_transfer_value, spist->write_len);
+                reset_tpm_framing(spist);
+                //return 0x00;
             }
             return 0xff;
         }
