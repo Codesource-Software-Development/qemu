@@ -47,8 +47,10 @@ typedef struct TPMStateSPI {
     int header_cnt;
     int is_read;
 
-    uint8_t transfer_bytes_left;
+    //uint8_t transfer_bytes_left;
+    uint8_t transfer_size;
     uint8_t write_len;
+    //uint8_t dummy_write_count;
 
     uint64_t addr;
 
@@ -129,10 +131,12 @@ static enum TPMVersion tpm_tis_spi_get_tpm_version(TPMIf *ti)
 static void reset_tpm_framing(TPMStateSPI *spist)
 {
     spist->in_header = 1;
+    spist->write_len = 0;
+    //spist->dummy_write_count = 4;
     spist->header_cnt = 0;
     spist->addr = 0;
-    spist->transfer_bytes_left = 0;
-    spist->write_len = 0;
+    //spist->transfer_bytes_left = 0;
+    spist->transfer_size = 0;
     spist->tpm_transfer_value = 0;
 }
 
@@ -146,88 +150,70 @@ static void tpm_tis_spi_reset(DeviceState *dev)
     return tpm_tis_reset(s);
 }
 
-static void tpm_tis_spi_ingest_first_header_byte(TPMStateSPI* spist, uint32_t val) {
-    spist->is_read = val & 0x80 ? 1 : 0;
-    spist->transfer_bytes_left = val & 0x7f;
-    spist->transfer_bytes_left += 1;
-    spist->write_len = spist->transfer_bytes_left; // Set the value in case it's a write.
-    ++spist->header_cnt;
+//static void tpm_tis_spi_ingest_first_header_byte(TPMStateSPI* spist, uint32_t val) {
+//
+//}
+
+static int tpm_tis_spi_set_cs(SSIPeripheral *dev, bool select)
+{
+    fprintf(stderr, "tpm_tis_spi_set_cs: %s\n", select == true ? "true": "false");
+    return 0;
 }
 
-static uint32_t tpm_tis_spi_transfer_raw(SSIPeripheral *dev, uint32_t val)
+static uint32_t tpm_tis_spi_transfer(SSIPeripheral *dev, uint32_t val)
 {
-    //if(dev->cs_index != 0) { // @TODO Make the cs index a property, instead of hardcoding it.
-    //    return 0x00;
-    //}
-    //if(!dev->cs) {
-    //    return 0x00;
-   // }
     fprintf(stderr, "tpm_tis_spi val: 0x%08x\n", val);
     TPMStateSPI *spist = TPM_TIS_SPI(dev);
     if(spist->in_header) {
         if(spist->header_cnt == 0) {
-            tpm_tis_spi_ingest_first_header_byte(spist, val);
+            spist->is_read = val & 0x80 ? 1 : 0;
+            spist->transfer_size = val & 0x7f;
+            spist->transfer_size += 1;
+            spist->write_len = spist->transfer_size + 1; // Set the value in case it's a write.
+            ++spist->header_cnt;
             return 0x00;
         } else if (spist->header_cnt == 1) {
-            //fprintf(stderr, "header count 1, val: 0x%02x\n",val);
             if (val != 0xd4) {
                 qemu_log_mask(LOG_GUEST_ERROR, "Received unexpected TIS-SPI opcode, expected 0xd4, got 0x%02x", val);
             }
             ++spist->header_cnt;
             return 0x00;
         } else if (spist->header_cnt == 2) {
-            //fprintf(stderr, "header count 2, val: 0x%02x\n",val);
             spist->addr = val << 8;
             ++spist->header_cnt;
             return 0x00;
         } else if (spist->header_cnt == 3) {
-            //fprintf(stderr, "header count 3, val: 0x%02x\n",val);
             spist->addr |= val & 0xff;
             spist->header_cnt = 0;
             spist->in_header = 0;
             if(spist->is_read) {
-                fprintf(stderr, "Calling tpm_tis_read with addr: 0x%08lx , len : 0x%02x\n", spist->addr, spist->transfer_bytes_left);
-                spist->tpm_transfer_value = tpm_tis_read_data(&spist->state, spist->addr, spist->transfer_bytes_left);
+                fprintf(stderr, "Calling tpm_tis_read with addr: 0x%08lx , len : 0x%02x\n", spist->addr, spist->transfer_size);
+                spist->tpm_transfer_value = tpm_tis_read_data(&spist->state, spist->addr, spist->transfer_size);
                 fprintf(stderr, "tpm_tis_read returned : 0x%04x\n", spist->tpm_transfer_value);
             }
-            return 0x00;
+            return 0x01;
         }
     } else {
-        //if(spist->transfer_bytes_left == 0) {
-        //    fprintf(stderr, "TPM-TIS-SPI, bad transfer len of 0, resetting TPM-SPI framing\n");
-        //    reset_tpm_framing(spist);
-        //    return 0xff;
-        //}
+        --spist->transfer_size;
+        uint32_t retval = 0x00;
         if(spist->is_read) {
-            if(val != 0x0) {
-                fprintf(stderr, "Dummy writes stopped, going back to header stage\n");
-                // No longer in dummy read state.
-                reset_tpm_framing(spist);
-                tpm_tis_spi_ingest_first_header_byte(spist, val);
-                return 0x00;
-            }
-            uint32_t retval = spist->tpm_transfer_value & 0xff;
-            spist->tpm_transfer_value >>= 8;
-            //spist->transfer_bytes_left--;
-            //if(spist->transfer_bytes_left == 0) {
-            //    reset_tpm_framing(spist);
-            //}
+            retval = (spist->tpm_transfer_value >> ((spist->transfer_size) * 8)) & 0xff;
             fprintf(stderr, "Dummy read, returning: 0x%02x\n", retval);
-            return retval;
+
         } else {
-            //fprintf(stderr, "Clocking in write value 0x%02x, trf bytes left: %d\n", val & 0xff, spist->transfer_bytes_left);
-            //spist->tpm_transfer_value <<= 8;
-            spist->tpm_transfer_value |= ((val & 0xff) << (spist->transfer_bytes_left-1) * 8);
-            fprintf(stderr , "Building value val: 0x%04x, bytes_left -1 : 0x%08x\n", spist->tpm_transfer_value, spist->transfer_bytes_left-1);
-            spist->transfer_bytes_left--;
-            if(spist->transfer_bytes_left == 0) {
+            spist->tpm_transfer_value |= ((val & 0xff) << (spist->transfer_size) * 8);
+            fprintf(stderr , "Building value val: 0x%04x, bytes_left -1 : 0x%08x\n", spist->tpm_transfer_value, spist->transfer_size);
+            if(spist->transfer_size == 0) {
                 fprintf(stderr, "Calling tpm_tis_write_data with addr: 0x%08lx value : 0x%08x len: 0x%02x\n", spist->addr, spist->tpm_transfer_value, spist->write_len);
                 tpm_tis_write_data(&spist->state, spist->addr, spist->tpm_transfer_value, spist->write_len);
                 reset_tpm_framing(spist);
-                //return 0x00;
             }
-            return 0x00;
         }
+
+        if(spist->transfer_size == 0) {
+            reset_tpm_framing(spist);
+        }
+        return retval;
     }
     return 0xff;
 }
@@ -268,9 +254,10 @@ static void tpm_tis_spi_class_init(ObjectClass *klass, const void *data)
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 
     k->realize = tpm_tis_spi_realize_ssi;
-    k->transfer = 0;//tpm_tis_spi_transfer;
-    k->transfer_raw = tpm_tis_spi_transfer_raw;
-
+    //k->transfer = 0;//tpm_tis_spi_transfer;
+    //k->transfer_raw = tpm_tis_spi_transfer_raw;
+    k->set_cs = tpm_tis_spi_set_cs;
+    k->transfer = tpm_tis_spi_transfer;
     tc->model = TPM_MODEL_TPM_TIS;
     tc->request_completed = tpm_tis_spi_request_completed;
     tc->get_version = tpm_tis_spi_get_tpm_version;
