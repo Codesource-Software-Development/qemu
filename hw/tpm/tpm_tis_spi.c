@@ -20,6 +20,25 @@
 #include "trace.h"
 #include "tpm_tis.h"
 
+
+/* TPM TIS SPI registers, based on drivers/char/tpm/tpm_tis_core.h */
+#define	TPM_ACCESS			(0x0000)
+#define	TPM_INT_ENABLE		(0x0008)
+#define	TPM_INT_VECTOR		(0x000C)
+#define	TPM_INT_STATUS		(0x0010)
+#define	TPM_INTF_CAPS		(0x0014)
+#define	TPM_STS		(0x0018)
+#define	TPM_STS3			(0x001b)
+#define	TPM_DATA_FIFO		(0x0024)
+
+#define	TPM_DID_VID(l)			(0x0F00 | ((l) << 12))
+#define	TPM_RID(l)			(0x0F04 | ((l) << 12))
+
+// Notes from studying tpm_tis_i2c.c
+// FIFO Reads/writes (so to TPM_DATA_FIFO) , immediately done, no caching
+// When being read through tpm_tis_read_data, mask return value with & 0xff, LSB is the value
+// To send back
+
 /*
  *
  * This tpm_tis_spi driver is eventually supposed to work using
@@ -154,15 +173,15 @@ static void tpm_tis_spi_reset(DeviceState *dev)
 //
 //}
 
-static int tpm_tis_spi_set_cs(SSIPeripheral *dev, bool select)
-{
-    fprintf(stderr, "tpm_tis_spi_set_cs: %s\n", select == true ? "true": "false");
-    return 0;
-}
+//static int tpm_tis_spi_set_cs(SSIPeripheral *dev, bool select)
+//{
+//    //fprintf(stderr, "tpm_tis_spi_set_cs: %s\n", select == true ? "true": "false");
+//    return 0;
+//}
 
 static uint32_t tpm_tis_spi_transfer(SSIPeripheral *dev, uint32_t val)
 {
-    fprintf(stderr, "tpm_tis_spi val: 0x%08x\n", val);
+    //fprintf(stderr, "tpm_tis_spi val: 0x%08x\n", val);
     TPMStateSPI *spist = TPM_TIS_SPI(dev);
     if(spist->in_header) {
         if(spist->header_cnt == 0) {
@@ -187,9 +206,11 @@ static uint32_t tpm_tis_spi_transfer(SSIPeripheral *dev, uint32_t val)
             spist->header_cnt = 0;
             spist->in_header = 0;
             if(spist->is_read) {
-                fprintf(stderr, "Calling tpm_tis_read with addr: 0x%08lx , len : 0x%02x\n", spist->addr, spist->transfer_size);
-                spist->tpm_transfer_value = tpm_tis_read_data(&spist->state, spist->addr, spist->transfer_size);
-                fprintf(stderr, "tpm_tis_read returned : 0x%04x\n", spist->tpm_transfer_value);
+                if(spist->addr != TPM_DATA_FIFO) {
+                    //fprintf(stderr, "Calling tpm_tis_read with addr: 0x%08lx , len : 0x%02x\n", spist->addr, spist->transfer_size);
+                    spist->tpm_transfer_value = tpm_tis_read_data(&spist->state, spist->addr, spist->transfer_size);
+                    //fprintf(stderr, "tpm_tis_read returned : 0x%04x\n", spist->tpm_transfer_value);
+                }
             }
             return 0x01;
         }
@@ -197,16 +218,27 @@ static uint32_t tpm_tis_spi_transfer(SSIPeripheral *dev, uint32_t val)
         --spist->transfer_size;
         uint32_t retval = 0x00;
         if(spist->is_read) {
-            retval = (spist->tpm_transfer_value >> ((spist->transfer_size) * 8)) & 0xff;
-            fprintf(stderr, "Dummy read, returning: 0x%02x\n", retval);
+            if (spist->addr == TPM_DATA_FIFO) {
+                retval= tpm_tis_read_data(&spist->state, spist->addr, 1);
+            } else {
+                retval = (spist->tpm_transfer_value >> ((spist->transfer_size) * 8)) & 0xff;
+                //fprintf(stderr, "Dummy read, returning: 0x%02x\n", retval);
+            }
 
         } else {
-            spist->tpm_transfer_value |= ((val & 0xff) << (spist->transfer_size) * 8);
-            fprintf(stderr , "Building value val: 0x%04x, bytes_left -1 : 0x%08x\n", spist->tpm_transfer_value, spist->transfer_size);
-            if(spist->transfer_size == 0) {
-                fprintf(stderr, "Calling tpm_tis_write_data with addr: 0x%08lx value : 0x%08x len: 0x%02x\n", spist->addr, spist->tpm_transfer_value, spist->write_len);
-                tpm_tis_write_data(&spist->state, spist->addr, spist->tpm_transfer_value, spist->write_len);
-                reset_tpm_framing(spist);
+            if(spist->addr == TPM_DATA_FIFO) {
+                tpm_tis_write_data(&spist->state, spist->addr, val & 0xff, 1);
+                if(spist->transfer_size == 0) {
+                    reset_tpm_framing(spist);
+                }
+            } else {
+                spist->tpm_transfer_value |= ((val & 0xff) << (spist->transfer_size) * 8);
+                //fprintf(stderr , "Building value val: 0x%04x, bytes_left -1 : 0x%08x\n", spist->tpm_transfer_value, spist->transfer_size);
+                if(spist->transfer_size == 0) {
+                    //fprintf(stderr, "Calling tpm_tis_write_data with addr: 0x%08lx value : 0x%08x len: 0x%02x\n", spist->addr, spist->tpm_transfer_value, spist->write_len);
+                    tpm_tis_write_data(&spist->state, spist->addr, spist->tpm_transfer_value, spist->write_len);
+                    reset_tpm_framing(spist);
+                }
             }
         }
 
@@ -256,7 +288,7 @@ static void tpm_tis_spi_class_init(ObjectClass *klass, const void *data)
     k->realize = tpm_tis_spi_realize_ssi;
     //k->transfer = 0;//tpm_tis_spi_transfer;
     //k->transfer_raw = tpm_tis_spi_transfer_raw;
-    k->set_cs = tpm_tis_spi_set_cs;
+    //k->set_cs = tpm_tis_spi_set_cs;
     k->transfer = tpm_tis_spi_transfer;
     tc->model = TPM_MODEL_TPM_TIS;
     tc->request_completed = tpm_tis_spi_request_completed;
